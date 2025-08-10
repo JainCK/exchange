@@ -25,7 +25,7 @@ Write-Host "  npm run dev" -ForegroundColor White
 Write-Host ""
 Write-Host "To start with Docker (from WSL):" -ForegroundColor Cyan
 Write-Host "  wsl" -ForegroundColor White
-Write-Host "  cd /mnt/j/Active\ Projects/exchange" -ForegroundColor White
+Write-Host "  cd /exchange" -ForegroundColor White
 Write-Host "  docker-compose up --build" -ForegroundColor White
 Write-Host ""
 Write-Host "API will be available at:" -ForegroundColor Cyan
