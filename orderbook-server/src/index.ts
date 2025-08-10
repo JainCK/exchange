@@ -1,174 +1,226 @@
 import express from "express";
-import { OrderInputSchema } from "./types";
-import { orderbook, bookWithQuantity } from "./orderbooks";
-
-const BASE_ASSET = "BTC";
-const QUOTE_ASSET = "USD";
+import { OrderInputSchema, LimitOrderSchema, MarketOrderSchema } from "./types";
+import { OrderbookManager } from "./orderbook/OrderbookManager";
+import { RedisService } from "./redis/RedisService";
+import { WebSocketServer } from "./websocket/WebSocketServer";
 
 const app = express();
 app.use(express.json());
 
-let GLOBAL_TRADE_ID = 0;
+// Configuration
+const HTTP_PORT = process.env.HTTP_PORT || 3000;
+const WS_PORT = process.env.WS_PORT || 3001;
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
-app.post("/api/v1/order", (req, res) => {
-  const order = OrderInputSchema.safeParse(req.body);
-  if (!order.success) {
-    res.status(400).send(order.error.message);
-    return;
+// Services
+let redisService: RedisService;
+let orderbookManager: OrderbookManager;
+let wsServer: WebSocketServer;
+
+// Initialize services
+async function initializeServices() {
+  try {
+    console.log("Initializing trading exchange services...");
+
+    // Initialize Redis
+    redisService = new RedisService(REDIS_URL);
+    await redisService.connect();
+
+    // Initialize Orderbook Manager
+    orderbookManager = new OrderbookManager(redisService);
+
+    // Initialize sample liquidity for demo
+    await orderbookManager.initializeSampleLiquidity();
+
+    // Initialize WebSocket server
+    wsServer = new WebSocketServer(
+      Number(WS_PORT),
+      redisService,
+      orderbookManager
+    );
+    wsServer.startHeartbeat();
+
+    console.log("All services initialized successfully");
+  } catch (error) {
+    console.error("Failed to initialize services:", error);
+    process.exit(1);
   }
+}
 
-  const { baseAsset, quoteAsset, price, quantity, side, kind } = order.data;
-  const orderId = getOrderId();
+// Health check endpoint
+app.get("/health", async (req, res) => {
+  const redisHealth = await redisService.ping();
+  const wsStats = wsServer.getStats();
 
-  if (baseAsset !== BASE_ASSET || quoteAsset !== QUOTE_ASSET) {
-    res.status(400).send("Invalid base or quote asset");
-    return;
-  }
-
-  const { executedQty, fills } = fillOrder(
-    orderId,
-    price,
-    quantity,
-    side,
-    kind
-  );
-
-  res.send({
-    orderId,
-    executedQty,
-    fills,
+  res.json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    services: {
+      redis: redisHealth ? "connected" : "disconnected",
+      websocket: {
+        connections: wsStats.totalConnections,
+        subscriptions: wsStats.totalSubscriptions,
+      },
+      orderbooks: orderbookManager.getTradingPairs().length,
+    },
   });
 });
 
-app.listen(3000, () => {
-  console.log("Server is running on port 3000");
+// Get trading pairs
+app.get("/api/v1/pairs", (req, res) => {
+  const pairs = orderbookManager.getTradingPairs();
+  res.json(pairs);
 });
 
-function getOrderId(): string {
-  return (
-    Math.random().toString(36).substring(2, 15) +
-    Math.random().toString(36).substring(2, 15)
-  );
-}
+// Get orderbook for a trading pair
+app.get("/api/v1/orderbook/:symbol", (req, res) => {
+  const { symbol } = req.params;
+  const depth = parseInt(req.query.depth as string) || 20;
 
-interface Fill {
-  price: number;
-  qty: number;
-  tradeId: number;
-}
-
-function fillOrder(
-  orderId: string,
-  price: number,
-  quantity: number,
-  side: "buy" | "sell",
-  type?: "ioc"
-): { status: "rejected" | "accepted"; executedQty: number; fills: Fill[] } {
-  const fills: Fill[] = [];
-  const maxFillQuantity = getFillAmount(price, quantity, side);
-  let executedQty = 0;
-
-  if (type === "ioc" && maxFillQuantity < quantity) {
-    return { status: "rejected", executedQty: maxFillQuantity, fills: [] };
+  const snapshot = orderbookManager.getOrderbookSnapshot(symbol, depth);
+  if (!snapshot) {
+    res.status(404).json({ error: "Trading pair not found" });
+    return;
   }
 
-  if (side === "buy") {
-    orderbook.asks.forEach((o) => {
-      if (o.price <= price && quantity > 0) {
-        console.log("filling ask");
-        const filledQuantity = Math.min(quantity, o.quantity);
-        console.log(filledQuantity);
-        o.quantity -= filledQuantity;
-        bookWithQuantity.asks[o.price] =
-          (bookWithQuantity.asks[o.price] || 0) - filledQuantity;
-        fills.push({
-          price: o.price,
-          qty: filledQuantity,
-          tradeId: GLOBAL_TRADE_ID++,
-        });
-        executedQty += filledQuantity;
-        quantity -= filledQuantity;
-        if (o.quantity === 0) {
-          orderbook.asks.splice(orderbook.asks.indexOf(o), 1);
-        }
-        if (bookWithQuantity.asks[price] === 0) {
-          delete bookWithQuantity.asks[price];
-        }
-      }
-    });
+  res.json(snapshot);
+});
 
-    // Place on the book if order not filled
-    if (quantity !== 0) {
-      orderbook.bids.push({
-        price,
-        quantity: quantity - executedQty,
-        side: "bid",
-        orderId,
+// Get market stats for all pairs
+app.get("/api/v1/stats", (req, res) => {
+  const allStats = orderbookManager.getAllMarketStats();
+  res.json(allStats);
+});
+
+// Get market stats for specific pair
+app.get("/api/v1/stats/:symbol", (req, res) => {
+  const { symbol } = req.params;
+  const stats = orderbookManager.getMarketStats(symbol);
+  if (!stats) {
+    res.status(404).json({ error: "Trading pair not found" });
+    return;
+  }
+  res.json({ symbol, ...stats });
+});
+
+// Submit a new order
+app.post("/api/v1/order", async (req, res) => {
+  try {
+    // Validate input
+    const orderValidation = OrderInputSchema.safeParse(req.body);
+    if (!orderValidation.success) {
+      res.status(400).json({
+        error: "Invalid order data",
+        details: orderValidation.error.issues,
       });
-      bookWithQuantity.bids[price] =
-        (bookWithQuantity.bids[price] || 0) + (quantity - executedQty);
+      return;
     }
-  } else {
-    orderbook.bids.forEach((o) => {
-      if (o.price >= price && quantity > 0) {
-        const filledQuantity = Math.min(quantity, o.quantity);
-        o.quantity -= filledQuantity;
-        bookWithQuantity.bids[price] =
-          (bookWithQuantity.bids[price] || 0) - filledQuantity;
-        fills.push({
-          price: o.price,
-          qty: filledQuantity,
-          tradeId: GLOBAL_TRADE_ID++,
+
+    const orderData = orderValidation.data;
+
+    // Additional validation based on order type
+    if (orderData.orderType === "limit") {
+      const limitValidation = LimitOrderSchema.safeParse(req.body);
+      if (!limitValidation.success) {
+        res.status(400).json({
+          error: "Limit orders require a price",
+          details: limitValidation.error.issues,
         });
-        executedQty += filledQuantity;
-        quantity -= filledQuantity;
-        if (o.quantity === 0) {
-          orderbook.bids.splice(orderbook.bids.indexOf(o), 1);
-        }
-        if (bookWithQuantity.bids[price] === 0) {
-          delete bookWithQuantity.bids[price];
-        }
+        return;
       }
-    });
-
-    // Place on the book if order not filled
-    if (quantity !== 0) {
-      orderbook.asks.push({
-        price,
-        quantity: quantity,
-        side: "ask",
-        orderId,
-      });
-      bookWithQuantity.asks[price] =
-        (bookWithQuantity.asks[price] || 0) + quantity;
     }
+
+    // Check if trading pair exists
+    const tradingPair = orderbookManager.getTradingPair(orderData.tradingPair);
+    if (!tradingPair) {
+      res.status(400).json({ error: "Invalid trading pair" });
+      return;
+    }
+
+    // Process the order
+    const result = await orderbookManager.processOrder({
+      tradingPair: orderData.tradingPair,
+      side: orderData.side,
+      orderType: orderData.orderType,
+      price: orderData.price,
+      quantity: orderData.quantity,
+      timeInForce: orderData.timeInForce,
+      userId: orderData.userId || `user_${Date.now()}`,
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error("Error processing order:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Cancel an order
+app.delete("/api/v1/order/:orderId", async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { tradingPair } = req.body;
+
+    if (!tradingPair) {
+      res.status(400).json({ error: "Trading pair is required" });
+      return;
+    }
+
+    const cancelled = await orderbookManager.cancelOrder(orderId, tradingPair);
+
+    if (cancelled) {
+      res.json({ success: true, message: "Order cancelled" });
+    } else {
+      res.status(404).json({ error: "Order not found" });
+    }
+  } catch (error) {
+    console.error("Error cancelling order:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get recent trades
+app.get("/api/v1/trades/:symbol", async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    const limit = parseInt(req.query.limit as string) || 50;
+
+    const trades = await redisService.getRecentTrades(symbol, limit);
+    res.json(trades);
+  } catch (error) {
+    console.error("Error fetching trades:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Start the HTTP server
+app.listen(HTTP_PORT, () => {
+  console.log(`HTTP server running on port ${HTTP_PORT}`);
+  console.log(`WebSocket server running on port ${WS_PORT}`);
+  console.log("\nAPI Endpoints:");
+  console.log(`  GET  /health - Health check`);
+  console.log(`  GET  /api/v1/pairs - Get trading pairs`);
+  console.log(`  GET  /api/v1/orderbook/:symbol - Get orderbook`);
+  console.log(`  GET  /api/v1/stats/:symbol? - Get market stats`);
+  console.log(`  POST /api/v1/order - Submit order`);
+  console.log(`  DELETE /api/v1/order/:orderId - Cancel order`);
+  console.log(`  GET  /api/v1/trades/:symbol - Get recent trades`);
+  console.log(`\nWebSocket URL: ws://localhost:${WS_PORT}`);
+});
+
+// Graceful shutdown
+process.on("SIGINT", async () => {
+  console.log("\nShutting down gracefully...");
+
+  if (redisService) {
+    await redisService.disconnect();
   }
 
-  return {
-    status: "accepted",
-    executedQty,
-    fills,
-  };
-}
+  process.exit(0);
+});
 
-function getFillAmount(
-  price: number,
-  quantity: number,
-  side: "buy" | "sell"
-): number {
-  let filled = 0;
-  if (side === "buy") {
-    orderbook.asks.forEach((o) => {
-      if (o.price < price) {
-        filled += Math.min(quantity, o.quantity);
-      }
-    });
-  } else {
-    orderbook.bids.forEach((o) => {
-      if (o.price > price) {
-        filled += Math.min(quantity, o.quantity);
-      }
-    });
-  }
-  return filled;
-}
+// Initialize services on startup
+initializeServices();
+
+// Export for testing
+export { app, orderbookManager, redisService };
