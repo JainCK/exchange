@@ -10,31 +10,28 @@ app.use(express.json());
 // Configuration
 const HTTP_PORT = process.env.HTTP_PORT || 3000;
 const WS_PORT = process.env.WS_PORT || 3001;
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
+const REDIS_URL = process.env.REDIS_URL || "redis://redis:6379";
 
-// Services
-let redisService: RedisService;
+// Global services
 let orderbookManager: OrderbookManager;
+let redisService: RedisService;
 let wsServer: WebSocketServer;
 
 // Initialize services
 async function initializeServices() {
   try {
-    console.log("Initializing trading exchange services...");
+    console.log("Initializing services...");
 
     // Initialize Redis
     redisService = new RedisService(REDIS_URL);
     await redisService.connect();
 
-    // Initialize Orderbook Manager
+    // Initialize Orderbook Manager with enhanced features
     orderbookManager = new OrderbookManager(redisService);
 
-    // Initialize sample liquidity for demo
-    await orderbookManager.initializeSampleLiquidity();
-
-    // Initialize WebSocket server
+    // Initialize WebSocket Server
     wsServer = new WebSocketServer(
-      Number(WS_PORT),
+      parseInt(WS_PORT.toString()),
       redisService,
       orderbookManager
     );
@@ -92,6 +89,29 @@ app.get("/api/v1/stats", (req, res) => {
   res.json(allStats);
 });
 
+// Get enhanced market stats (must come before :symbol route)
+// TODO: Enhanced stats endpoint may have route conflicts - revisit if needed for frontend dashboard
+// Use case: Comprehensive market overview with spreads, fees, trading pair details, and advanced analytics
+// Priority: Low - basic /api/v1/stats/:symbol endpoint covers most frontend needs
+app.get("/api/v1/stats/enhanced", (req, res) => {
+  try {
+    if (!orderbookManager) {
+      res.status(503).json({ error: "Service not initialized yet" });
+      return;
+    }
+
+    const stats = orderbookManager.getEnhancedMarketStats();
+    console.log("Enhanced stats generated:", Object.keys(stats));
+    res.json(stats);
+  } catch (error) {
+    console.error("Error getting enhanced stats:", error);
+    res.status(500).json({
+      error: "Internal server error",
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 // Get market stats for specific pair
 app.get("/api/v1/stats/:symbol", (req, res) => {
   const { symbol } = req.params;
@@ -118,23 +138,25 @@ app.post("/api/v1/order", async (req, res) => {
 
     const orderData = orderValidation.data;
 
-    // Additional validation based on order type
+    // Validate order type specific requirements
     if (orderData.orderType === "limit") {
-      const limitValidation = LimitOrderSchema.safeParse(req.body);
+      const limitValidation = LimitOrderSchema.safeParse(orderData);
       if (!limitValidation.success) {
         res.status(400).json({
-          error: "Limit orders require a price",
+          error: "Invalid limit order",
           details: limitValidation.error.issues,
         });
         return;
       }
-    }
-
-    // Check if trading pair exists
-    const tradingPair = orderbookManager.getTradingPair(orderData.tradingPair);
-    if (!tradingPair) {
-      res.status(400).json({ error: "Invalid trading pair" });
-      return;
+    } else if (orderData.orderType === "market") {
+      const marketValidation = MarketOrderSchema.safeParse(orderData);
+      if (!marketValidation.success) {
+        res.status(400).json({
+          error: "Invalid market order",
+          details: marketValidation.error.issues,
+        });
+        return;
+      }
     }
 
     // Process the order
@@ -188,39 +210,117 @@ app.get("/api/v1/trades/:symbol", async (req, res) => {
     const trades = await redisService.getRecentTrades(symbol, limit);
     res.json(trades);
   } catch (error) {
-    console.error("Error fetching trades:", error);
+    console.error("Error getting recent trades:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// Start the HTTP server
+// Enhanced API endpoints for new features
+
+// Get user position
+app.get("/api/v1/position/:userId/:symbol", (req, res) => {
+  try {
+    const { userId, symbol } = req.params;
+    const position = orderbookManager.getUserPosition(userId, symbol);
+    res.json(position);
+  } catch (error) {
+    console.error("Error getting user position:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get trade statistics
+app.get("/api/v1/trades/stats/:symbol", async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    const { timeframe } = req.query;
+
+    const stats = await orderbookManager.getTradeStats(
+      symbol,
+      (timeframe as "1h" | "24h" | "7d") || "24h"
+    );
+
+    res.json(stats);
+  } catch (error) {
+    console.error("Error getting trade stats:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get trading fee information
+app.get("/api/v1/fees", (req, res) => {
+  try {
+    const feeRate = orderbookManager.getTradingFee();
+    res.json({
+      feeRate,
+      feePercentage: (feeRate * 100).toFixed(3) + "%",
+      description: "Trading fee applied to all executed trades",
+    });
+  } catch (error) {
+    console.error("Error getting fee info:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin endpoint to set trading fees (in production, this should be protected)
+app.post("/api/v1/admin/fees", (req, res) => {
+  try {
+    const { feeRate } = req.body;
+
+    if (typeof feeRate !== "number" || feeRate < 0 || feeRate > 0.01) {
+      res
+        .status(400)
+        .json({ error: "Fee rate must be between 0 and 0.01 (1%)" });
+      return;
+    }
+
+    orderbookManager.setTradingFee(feeRate);
+    res.json({
+      success: true,
+      newFeeRate: feeRate,
+      message: "Trading fee updated successfully",
+    });
+  } catch (error) {
+    console.error("Error setting trading fee:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Admin endpoint to reset daily limits
+app.post("/api/v1/admin/reset-limits", (req, res) => {
+  try {
+    orderbookManager.resetDailyLimits();
+    res.json({ success: true, message: "Daily limits reset successfully" });
+  } catch (error) {
+    console.error("Error resetting daily limits:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Start the server
 app.listen(HTTP_PORT, () => {
-  console.log(`HTTP server running on port ${HTTP_PORT}`);
-  console.log(`WebSocket server running on port ${WS_PORT}`);
-  console.log("\nAPI Endpoints:");
-  console.log(`  GET  /health - Health check`);
-  console.log(`  GET  /api/v1/pairs - Get trading pairs`);
-  console.log(`  GET  /api/v1/orderbook/:symbol - Get orderbook`);
-  console.log(`  GET  /api/v1/stats/:symbol? - Get market stats`);
-  console.log(`  POST /api/v1/order - Submit order`);
-  console.log(`  DELETE /api/v1/order/:orderId - Cancel order`);
-  console.log(`  GET  /api/v1/trades/:symbol - Get recent trades`);
-  console.log(`\nWebSocket URL: ws://localhost:${WS_PORT}`);
+  console.log(`🚀 Enhanced Orderbook Server running on port ${HTTP_PORT}`);
+  console.log(`📊 WebSocket server running on port ${WS_PORT}`);
+  console.log(`💾 Redis connection: ${REDIS_URL}`);
+
+  // Initialize services after server starts
+  initializeServices().then(() => {
+    // Add sample liquidity
+    orderbookManager.initializeSampleLiquidity();
+    console.log("✅ Server fully initialized with enhanced features:");
+    console.log("   - Price-time priority matching");
+    console.log("   - Risk management checks");
+    console.log("   - Position management");
+    console.log("   - Real-time trade execution");
+    console.log("   - Enhanced API endpoints");
+  });
 });
 
 // Graceful shutdown
-process.on("SIGINT", async () => {
-  console.log("\nShutting down gracefully...");
-
-  if (redisService) {
-    await redisService.disconnect();
-  }
-
+process.on("SIGTERM", async () => {
+  console.log("Shutting down gracefully...");
+  await redisService.disconnect();
   process.exit(0);
 });
 
-// Initialize services on startup
-initializeServices();
-
-// Export for testing
 export { app, orderbookManager, redisService };

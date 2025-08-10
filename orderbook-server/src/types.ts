@@ -14,8 +14,8 @@ export interface TradingPair {
 
 // Order types
 export type OrderSide = "buy" | "sell";
-export type OrderType = "limit" | "market" | "stop_loss" | "take_profit";
-export type TimeInForce = "GTC" | "IOC" | "FOK" | "DAY"; // Good Till Cancel, Immediate or Cancel, Fill or Kill, Day Order
+export type OrderType = "limit" | "market";
+export type TimeInForce = "GTC" | "IOC" | "FOK"; // Good Till Cancel, Immediate or Cancel, Fill or Kill
 export type OrderStatus =
   | "pending"
   | "open"
@@ -23,33 +23,6 @@ export type OrderStatus =
   | "cancelled"
   | "rejected"
   | "partially_filled";
-
-// Risk management types
-export interface RiskLimits {
-  maxOrderValue: number;
-  maxDailyVolume: number;
-  maxOpenOrders: number;
-  maxPositionSize: number;
-  minOrderValue: number;
-}
-
-export interface Position {
-  userId: string;
-  tradingPair: string;
-  side: OrderSide;
-  size: number;
-  averagePrice: number;
-  unrealizedPnL: number;
-  realizedPnL: number;
-  openedAt: Date;
-  updatedAt: Date;
-}
-
-export interface RiskCheckResult {
-  passed: boolean;
-  reason?: string;
-  riskScore?: number;
-}
 
 // Base order interface
 export interface Order {
@@ -66,6 +39,11 @@ export interface Order {
   timeInForce: TimeInForce;
   createdAt: Date;
   updatedAt: Date;
+  // Enhanced fields for advanced matching
+  sequenceNumber: number; // For time priority within same price
+  priority: number; // Price-time priority score
+  averagePrice?: number; // Average fill price
+  fees?: number; // Trading fees paid
 }
 
 // Bid and Ask specific interfaces
@@ -179,9 +157,49 @@ export const TRADING_PAIRS: TradingPair[] = [
   },
 ];
 
+// Risk Management Types
+export interface RiskLimits {
+  maxOrderSize: number;
+  maxDailyVolume: number;
+  maxOpenOrders: number;
+  maxPositionSize: number;
+  minPriceDeviation: number; // Minimum price change from market
+  maxPriceDeviation: number; // Maximum price change from market
+}
+
+export interface UserPosition {
+  userId: string;
+  tradingPair: string;
+  baseBalance: number; // Available base asset
+  quoteBalance: number; // Available quote asset
+  lockedBase: number; // Base asset locked in open orders
+  lockedQuote: number; // Quote asset locked in open orders
+  dailyVolume: number; // Daily trading volume
+  openOrderCount: number;
+  lastTradeTime: Date;
+}
+
+export interface RiskCheckResult {
+  isValid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface TradeExecution {
+  tradeId: string;
+  buyOrder: Order;
+  sellOrder: Order;
+  price: number;
+  quantity: number;
+  timestamp: Date;
+  buyerFee: number;
+  sellerFee: number;
+  matchType: "full" | "partial_buyer" | "partial_seller" | "partial_both";
+}
+
 // Redis message types
 export interface OrderMessage {
-  type: "NEW_ORDER" | "CANCEL_ORDER";
+  type: "NEW_ORDER" | "CANCEL_ORDER" | "ORDER_UPDATE";
   order: Order;
   timestamp: Date;
 }
