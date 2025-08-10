@@ -34,7 +34,7 @@ services:
     container_name: exchange_orderbook
     ports:
       - "3000:3000"
-      - "3001:3001"  # WebSocket port
+      - "3001:3001" # WebSocket port
     environment:
       - NODE_ENV=development
       - REDIS_URL=redis://redis:6379
