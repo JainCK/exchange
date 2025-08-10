@@ -88,6 +88,12 @@ export class PriceLevelTree {
     return total;
   }
 
+  // Remove a price level completely
+  removeLevel(price: number): void {
+    this.levels.delete(price);
+    this.sortedPrices = this.sortedPrices.filter((p) => p !== price);
+  }
+
   private insertSorted(price: number): void {
     let insertIndex = 0;
 

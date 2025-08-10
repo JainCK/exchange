@@ -1,5 +1,7 @@
 import { Orderbook } from "./Orderbook";
 import { RedisService } from "../redis/RedisService";
+import { RiskManager } from "../risk/RiskManager";
+import { TradeExecutor } from "../execution/TradeExecutor";
 import {
   Order,
   OrderResult,
@@ -15,11 +17,17 @@ export class OrderbookManager {
   private orderbooks: Map<string, Orderbook>;
   private redisService: RedisService;
   private tradingPairs: Map<string, TradingPair>;
+  private riskManager: RiskManager;
+  private tradeExecutor: TradeExecutor;
 
   constructor(redisService: RedisService) {
     this.orderbooks = new Map();
     this.redisService = redisService;
     this.tradingPairs = new Map();
+
+    // Initialize enhanced services
+    this.riskManager = new RiskManager();
+    this.tradeExecutor = new TradeExecutor(this.riskManager, redisService);
 
     this.initializeTradingPairs();
   }
@@ -27,11 +35,15 @@ export class OrderbookManager {
   private initializeTradingPairs(): void {
     TRADING_PAIRS.forEach((pair) => {
       this.tradingPairs.set(pair.symbol, pair);
-      this.orderbooks.set(pair.symbol, new Orderbook(pair));
+      // Create enhanced orderbook with risk management and trade execution
+      this.orderbooks.set(
+        pair.symbol,
+        new Orderbook(pair, this.riskManager, this.tradeExecutor)
+      );
     });
 
     console.log(
-      `Initialized ${TRADING_PAIRS.length} trading pairs:`,
+      `Initialized ${TRADING_PAIRS.length} enhanced trading pairs:`,
       TRADING_PAIRS.map((p) => p.symbol).join(", ")
     );
   }
@@ -59,7 +71,7 @@ export class OrderbookManager {
       };
     }
 
-    // Create order object
+    // Create order object with enhanced fields
     const order: Order = {
       orderId: uuidv4(),
       userId: orderData.userId,
@@ -74,10 +86,12 @@ export class OrderbookManager {
       timeInForce: orderData.timeInForce || "GTC",
       createdAt: new Date(),
       updatedAt: new Date(),
+      sequenceNumber: 0, // Will be set by orderbook
+      priority: 0, // Will be calculated by orderbook
     };
 
-    // Execute the order
-    const result = orderbook.addOrder(order);
+    // Execute the order (now async)
+    const result = await orderbook.addOrder(order);
 
     // Publish trade messages for any fills
     for (const fill of result.fills) {
@@ -258,5 +272,78 @@ export class OrderbookManager {
     }
 
     console.log("Sample liquidity initialized for all trading pairs");
+  }
+
+  // Get user position information
+  getUserPosition(userId: string, tradingPair: string) {
+    return this.riskManager.getUserPositionInfo(userId, tradingPair);
+  }
+
+  // Get trade statistics
+  async getTradeStats(
+    tradingPair: string,
+    timeframe: "1h" | "24h" | "7d" = "24h"
+  ) {
+    return this.tradeExecutor.getTradeStats(tradingPair, timeframe);
+  }
+
+  // Set custom risk limits
+  setRiskLimits(tradingPair: string, limits: any) {
+    this.riskManager.setRiskLimits(tradingPair, limits);
+  }
+
+  // Set trading fee rate
+  setTradingFee(rate: number) {
+    this.tradeExecutor.setFeeRate(rate);
+  }
+
+  // Get current trading fee rate
+  getTradingFee(): number {
+    return this.tradeExecutor.getFeeRate();
+  }
+
+  // Reset daily volume limits (should be called daily)
+  resetDailyLimits() {
+    this.riskManager.resetDailyVolume();
+  }
+
+  // Get enhanced market statistics
+  getEnhancedMarketStats() {
+    const stats: any = {};
+
+    this.orderbooks.forEach((orderbook, symbol) => {
+      try {
+        const basicStats = orderbook.getMarketStats();
+
+        stats[symbol] = {
+          ...basicStats,
+          tradingFee: this.getTradingFee(),
+          spread:
+            basicStats.bestAsk && basicStats.bestBid
+              ? (
+                  ((basicStats.bestAsk - basicStats.bestBid) /
+                    basicStats.bestBid) *
+                  100
+                ).toFixed(2) + "%"
+              : "N/A",
+          midPrice:
+            basicStats.bestAsk && basicStats.bestBid
+              ? ((basicStats.bestAsk + basicStats.bestBid) / 2).toFixed(2)
+              : "N/A",
+          // Add trading pair info
+          tradingPair: symbol,
+          minOrderSize: this.tradingPairs.get(symbol)?.minOrderSize || 0,
+          maxOrderSize: this.tradingPairs.get(symbol)?.maxOrderSize || 0,
+          pricePrecision: this.tradingPairs.get(symbol)?.pricePrecision || 2,
+          quantityPrecision:
+            this.tradingPairs.get(symbol)?.quantityPrecision || 4,
+          isActive: this.tradingPairs.get(symbol)?.isActive || false,
+        };
+      } catch (error) {
+        console.error(`Error processing stats for ${symbol}:`, error);
+      }
+    });
+
+    return stats;
   }
 }

@@ -12,6 +12,8 @@ import {
   OrderType,
 } from "../types";
 import { v4 as uuidv4 } from "uuid";
+import { RiskManager } from "../risk/RiskManager";
+import { TradeExecutor } from "../execution/TradeExecutor";
 
 export class Orderbook {
   private tradingPair: TradingPair;
@@ -21,17 +23,61 @@ export class Orderbook {
   private lastPrice: number = 0;
   private volume24h: number = 0;
   private priceChange24h: number = 0;
+  private sequenceCounter: number = 0;
+  private riskManager?: RiskManager;
+  private tradeExecutor?: TradeExecutor;
 
-  constructor(tradingPair: TradingPair) {
+  constructor(
+    tradingPair: TradingPair,
+    riskManager?: RiskManager,
+    tradeExecutor?: TradeExecutor
+  ) {
     this.tradingPair = tradingPair;
     this.bids = new PriceLevelTree(false); // Descending for bids
     this.asks = new PriceLevelTree(true); // Ascending for asks
     this.orders = new Map();
+    this.riskManager = riskManager;
+    this.tradeExecutor = tradeExecutor;
   }
 
-  // Add a new order to the orderbook
-  addOrder(order: Order): OrderResult {
+  // Add a new order to the orderbook with enhanced price-time priority
+  async addOrder(order: Order): Promise<OrderResult> {
     try {
+      // Assign sequence number for time priority
+      order.sequenceNumber = ++this.sequenceCounter;
+
+      // Calculate priority score
+      if (this.tradeExecutor) {
+        order.priority = this.tradeExecutor.calculatePriority(order);
+      }
+
+      // Risk management check
+      if (this.riskManager) {
+        const riskCheck = this.riskManager.checkOrderRisk(
+          order,
+          this.tradingPair
+        );
+        if (!riskCheck.isValid) {
+          return {
+            orderId: order.orderId,
+            status: "rejected",
+            executedQuantity: 0,
+            remainingQuantity: order.quantity,
+            averagePrice: 0,
+            fills: [],
+            message: `Risk check failed: ${riskCheck.errors.join(", ")}`,
+          };
+        }
+
+        // Log warnings
+        if (riskCheck.warnings.length > 0) {
+          console.warn(
+            `Order warnings for ${order.orderId}:`,
+            riskCheck.warnings
+          );
+        }
+      }
+
       // Validate order
       const validation = this.validateOrder(order);
       if (!validation.isValid) {
@@ -44,6 +90,29 @@ export class Orderbook {
           fills: [],
           message: validation.message,
         };
+      }
+
+      // Lock funds if risk manager is available
+      if (this.riskManager && order.userId) {
+        const fundsLocked = this.riskManager.lockFunds(
+          order.userId,
+          order.tradingPair,
+          order.side,
+          order.quantity,
+          order.price
+        );
+
+        if (!fundsLocked) {
+          return {
+            orderId: order.orderId,
+            status: "rejected",
+            executedQuantity: 0,
+            remainingQuantity: order.quantity,
+            averagePrice: 0,
+            fills: [],
+            message: "Insufficient funds",
+          };
+        }
       }
 
       // Handle market orders
@@ -155,13 +224,13 @@ export class Orderbook {
   }
 
   // Execute a limit order
-  private executeLimitOrder(order: Order): OrderResult {
+  private async executeLimitOrder(order: Order): Promise<OrderResult> {
     const fills: Fill[] = [];
     let remainingQuantity = order.quantity;
     let totalExecutedQuantity = 0;
     let totalExecutedValue = 0;
 
-    // First, try to match against existing orders
+    // First, try to match against existing orders with price-time priority
     const oppositeTree = order.side === "buy" ? this.asks : this.bids;
 
     while (remainingQuantity > 0 && !oppositeTree.isEmpty()) {
@@ -177,25 +246,86 @@ export class Orderbook {
       if (!canMatch) break;
 
       const level = oppositeTree.getLevel(bestPrice);
-      if (!level) break;
+      if (!level || level.orderIds.length === 0) break;
 
-      const fillQuantity = Math.min(remainingQuantity, level.totalQuantity);
+      // Enhanced matching: Get the oldest order at this price level (FIFO within price level)
+      const matchingOrderId = level.orderIds[0]; // First order = oldest due to FIFO
+      const matchingOrder = this.orders.get(matchingOrderId);
 
-      // Execute the fill
-      const fill = this.createFill(order, bestPrice, fillQuantity);
-      fills.push(fill);
+      if (!matchingOrder) {
+        // Clean up orphaned order reference
+        this.removeOrderFromLevel(oppositeTree, bestPrice, matchingOrderId);
+        continue;
+      }
 
-      totalExecutedQuantity += fillQuantity;
-      totalExecutedValue += fillQuantity * bestPrice;
-      remainingQuantity -= fillQuantity;
-
-      // Update the opposite level
-      this.updatePriceLevel(
-        oppositeTree,
-        bestPrice,
-        fillQuantity,
-        level.orderIds[0]
+      const fillQuantity = Math.min(
+        remainingQuantity,
+        matchingOrder.remainingQuantity
       );
+
+      // Use enhanced trade executor if available
+      if (this.tradeExecutor) {
+        const buyOrder = order.side === "buy" ? order : matchingOrder;
+        const sellOrder = order.side === "sell" ? order : matchingOrder;
+
+        const tradeExecution = await this.tradeExecutor.executeTrade(
+          buyOrder,
+          sellOrder,
+          fillQuantity,
+          bestPrice
+        );
+
+        if (tradeExecution) {
+          // Create fill record
+          const fill = this.createEnhancedFill(
+            order,
+            matchingOrder,
+            bestPrice,
+            fillQuantity,
+            tradeExecution.tradeId
+          );
+          fills.push(fill);
+
+          totalExecutedQuantity += fillQuantity;
+          totalExecutedValue += fillQuantity * bestPrice;
+          remainingQuantity -= fillQuantity;
+
+          // Update matching order
+          matchingOrder.filledQuantity += fillQuantity;
+          matchingOrder.remainingQuantity -= fillQuantity;
+          matchingOrder.updatedAt = new Date();
+
+          // Remove completed orders from the book
+          if (matchingOrder.remainingQuantity <= 0) {
+            matchingOrder.status = "filled";
+            this.orders.delete(matchingOrderId);
+          }
+
+          // Update price level
+          this.updatePriceLevelAfterFill(
+            oppositeTree,
+            bestPrice,
+            matchingOrderId,
+            fillQuantity
+          );
+        }
+      } else {
+        // Fallback to basic execution
+        const fill = this.createFill(order, bestPrice, fillQuantity);
+        fills.push(fill);
+
+        totalExecutedQuantity += fillQuantity;
+        totalExecutedValue += fillQuantity * bestPrice;
+        remainingQuantity -= fillQuantity;
+
+        // Update the opposite level
+        this.updatePriceLevel(
+          oppositeTree,
+          bestPrice,
+          fillQuantity,
+          level.orderIds[0]
+        );
+      }
 
       // Update last price
       this.lastPrice = bestPrice;
@@ -320,6 +450,78 @@ export class Orderbook {
       bestBid: this.bids.getBestPrice(),
       bestAsk: this.asks.getBestPrice(),
     };
+  }
+
+  // Enhanced fill creation with trade ID
+  private createEnhancedFill(
+    takerOrder: Order,
+    makerOrder: Order,
+    price: number,
+    quantity: number,
+    tradeId: string
+  ): Fill {
+    return {
+      price,
+      quantity,
+      tradeId,
+      timestamp: new Date(),
+      buyerOrderId:
+        takerOrder.side === "buy" ? takerOrder.orderId : makerOrder.orderId,
+      sellerOrderId:
+        takerOrder.side === "sell" ? takerOrder.orderId : makerOrder.orderId,
+      buyerUserId:
+        takerOrder.side === "buy" ? takerOrder.userId : makerOrder.userId,
+      sellerUserId:
+        takerOrder.side === "sell" ? takerOrder.userId : makerOrder.userId,
+    };
+  }
+
+  // Remove specific order from price level
+  private removeOrderFromLevel(
+    tree: PriceLevelTree,
+    price: number,
+    orderId: string
+  ): void {
+    const level = tree.getLevel(price);
+    if (level) {
+      const index = level.orderIds.indexOf(orderId);
+      if (index > -1) {
+        level.orderIds.splice(index, 1);
+        if (level.orderIds.length === 0) {
+          tree.removeLevel(price);
+        }
+      }
+    }
+  }
+
+  // Update price level after fill with proper order management
+  private updatePriceLevelAfterFill(
+    tree: PriceLevelTree,
+    price: number,
+    orderId: string,
+    filledQuantity: number
+  ): void {
+    const level = tree.getLevel(price);
+    if (!level) return;
+
+    const order = this.orders.get(orderId);
+    if (!order) {
+      this.removeOrderFromLevel(tree, price, orderId);
+      return;
+    }
+
+    // Update level quantities
+    level.totalQuantity -= filledQuantity;
+
+    // If order is completely filled, remove from level
+    if (order.remainingQuantity <= 0) {
+      this.removeOrderFromLevel(tree, price, orderId);
+    }
+
+    // If level is empty, remove it
+    if (level.totalQuantity <= 0 || level.orderIds.length === 0) {
+      tree.removeLevel(price);
+    }
   }
 
   private validateOrder(order: Order): { isValid: boolean; message?: string } {

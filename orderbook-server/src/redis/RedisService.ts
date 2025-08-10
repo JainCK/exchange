@@ -212,6 +212,23 @@ export class RedisService {
     }
   }
 
+  // Store data with TTL
+  async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
+    if (!this.isConnected) return;
+
+    if (ttlSeconds) {
+      await this.client.setEx(key, ttlSeconds, value);
+    } else {
+      await this.client.set(key, value);
+    }
+  }
+
+  // Get data
+  async get(key: string): Promise<string | null> {
+    if (!this.isConnected) return null;
+    return await this.client.get(key);
+  }
+
   private setupErrorHandlers(): void {
     this.client.on("error", (err) => {
       console.error("Redis Client Error:", err);
