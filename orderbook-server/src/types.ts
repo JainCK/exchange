@@ -2,9 +2,9 @@ import { z } from "zod";
 
 // Trading pair configuration
 export interface TradingPair {
-  symbol: string;        // e.g., "BTCUSD"
-  baseAsset: string;     // e.g., "BTC"
-  quoteAsset: string;    // e.g., "USD"
+  symbol: string; // e.g., "BTCUSD"
+  baseAsset: string; // e.g., "BTC"
+  quoteAsset: string; // e.g., "USD"
   minOrderSize: number;
   maxOrderSize: number;
   pricePrecision: number;
@@ -14,9 +14,42 @@ export interface TradingPair {
 
 // Order types
 export type OrderSide = "buy" | "sell";
-export type OrderType = "limit" | "market";
-export type TimeInForce = "GTC" | "IOC" | "FOK"; // Good Till Cancel, Immediate or Cancel, Fill or Kill
-export type OrderStatus = "pending" | "open" | "filled" | "cancelled" | "rejected" | "partially_filled";
+export type OrderType = "limit" | "market" | "stop_loss" | "take_profit";
+export type TimeInForce = "GTC" | "IOC" | "FOK" | "DAY"; // Good Till Cancel, Immediate or Cancel, Fill or Kill, Day Order
+export type OrderStatus =
+  | "pending"
+  | "open"
+  | "filled"
+  | "cancelled"
+  | "rejected"
+  | "partially_filled";
+
+// Risk management types
+export interface RiskLimits {
+  maxOrderValue: number;
+  maxDailyVolume: number;
+  maxOpenOrders: number;
+  maxPositionSize: number;
+  minOrderValue: number;
+}
+
+export interface Position {
+  userId: string;
+  tradingPair: string;
+  side: OrderSide;
+  size: number;
+  averagePrice: number;
+  unrealizedPnL: number;
+  realizedPnL: number;
+  openedAt: Date;
+  updatedAt: Date;
+}
+
+export interface RiskCheckResult {
+  passed: boolean;
+  reason?: string;
+  riskScore?: number;
+}
 
 // Base order interface
 export interface Order {
@@ -25,7 +58,7 @@ export interface Order {
   tradingPair: string;
   side: OrderSide;
   orderType: OrderType;
-  price: number;        // For market orders, this will be 0 initially
+  price: number; // For market orders, this will be 0 initially
   quantity: number;
   filledQuantity: number;
   remainingQuantity: number;
@@ -126,7 +159,7 @@ export const TRADING_PAIRS: TradingPair[] = [
   },
   {
     symbol: "ETHUSD",
-    baseAsset: "ETH", 
+    baseAsset: "ETH",
     quoteAsset: "USD",
     minOrderSize: 0.001,
     maxOrderSize: 10000,
@@ -137,13 +170,13 @@ export const TRADING_PAIRS: TradingPair[] = [
   {
     symbol: "LTCUSD",
     baseAsset: "LTC",
-    quoteAsset: "USD", 
+    quoteAsset: "USD",
     minOrderSize: 0.01,
     maxOrderSize: 50000,
     pricePrecision: 2,
     quantityPrecision: 4,
     isActive: true,
-  }
+  },
 ];
 
 // Redis message types
