@@ -1,0 +1,228 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  username  String?  @unique
+  password  String
+  firstName String?
+  lastName  String?
+  
+  // Account status
+  isEmailVerified Boolean @default(false)
+  isActive        Boolean @default(true)
+  isSuspended     Boolean @default(false)
+  
+  // KYC status
+  kycStatus       KycStatus @default(PENDING)
+  kycSubmittedAt  DateTime?
+  kycApprovedAt   DateTime?
+  
+  // Security
+  twoFactorEnabled Boolean @default(false)
+  twoFactorSecret  String?
+  
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastLoginAt DateTime?
+  
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  balances      Balance[]
+  orders        Order[]
+  trades        Trade[]
+  transactions  Transaction[]
+  
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model Balance {
+  id          String  @id @default(cuid())
+  userId      String
+  asset       String  // BTC, ETH, USD, etc.
+  available   Decimal @default(0) @db.Decimal(20, 8)
+  locked      Decimal @default(0) @db.Decimal(20, 8)
+  total       Decimal @default(0) @db.Decimal(20, 8)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  user        User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, asset])
+  @@map("balances")
+}
+
+model Order {
+  id              String      @id @default(cuid())
+  userId          String
+  tradingPair     String
+  side            OrderSide
+  orderType       OrderType
+  status          OrderStatus
+  
+  // Pricing
+  price           Decimal?    @db.Decimal(20, 8)
+  quantity        Decimal     @db.Decimal(20, 8)
+  filledQuantity  Decimal     @default(0) @db.Decimal(20, 8)
+  averagePrice    Decimal?    @db.Decimal(20, 8)
+  
+  // Fees
+  fee             Decimal     @default(0) @db.Decimal(20, 8)
+  feeAsset        String?
+  
+  // Metadata
+  timeInForce     TimeInForce @default(GTC)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  filledAt        DateTime?
+  cancelledAt     DateTime?
+  
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trades          Trade[]
+  
+  @@map("orders")
+}
+
+model Trade {
+  id              String    @id @default(cuid())
+  buyOrderId      String
+  sellOrderId     String
+  buyUserId       String
+  sellUserId      String
+  tradingPair     String
+  
+  price           Decimal   @db.Decimal(20, 8)
+  quantity        Decimal   @db.Decimal(20, 8)
+  
+  buyerFee        Decimal   @db.Decimal(20, 8)
+  sellerFee       Decimal   @db.Decimal(20, 8)
+  
+  executedAt      DateTime  @default(now())
+  
+  buyOrder        Order     @relation(fields: [buyOrderId], references: [id])
+  buyUser         User      @relation(fields: [buyUserId], references: [id])
+  
+  @@map("trades")
+}
+
+model Transaction {
+  id          String            @id @default(cuid())
+  userId      String
+  type        TransactionType
+  asset       String
+  amount      Decimal           @db.Decimal(20, 8)
+  fee         Decimal           @default(0) @db.Decimal(20, 8)
+  status      TransactionStatus
+  
+  // External references
+  txHash      String?           // Blockchain transaction hash
+  orderId     String?           // Related order ID
+  tradeId     String?           // Related trade ID
+  
+  // Metadata
+  description String?
+  metadata    Json?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("transactions")
+}
+
+// Enums
+enum KycStatus {
+  PENDING
+  SUBMITTED
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+  STOP_LOSS
+  STOP_LIMIT
+}
+
+enum OrderStatus {
+  PENDING
+  OPEN
+  FILLED
+  CANCELLED
+  REJECTED
+  PARTIALLY_FILLED
+}
+
+enum TimeInForce {
+  GTC  // Good Till Cancel
+  IOC  // Immediate or Cancel
+  FOK  // Fill or Kill
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRADE
+  FEE
+  REBATE
+  TRANSFER
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
