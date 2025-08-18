@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # Database Services
   timescaledb:
@@ -26,7 +24,7 @@ services:
     restart: unless-stopped
     command: redis-server --appendonly yes
 
-  # Enhanced Orderbook Server (your existing server evolved)
+  # Enhanced Orderbook Server (Trading Engine)
   orderbook-server:
     build:
       context: ./orderbook-server
@@ -45,6 +43,37 @@ services:
     restart: unless-stopped
     volumes:
       - ./orderbook-server:/app
+      - /app/node_modules
+
+  # API Server (Authentication & User Management)
+  api-server:
+    build:
+      context: ./api-server
+      dockerfile: Dockerfile
+    container_name: exchange_api
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=development
+      - PORT=4000
+      - DATABASE_URL=postgresql://exchange_user:exchange_password@timescaledb:5432/exchange_db
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+      - JWT_EXPIRES_IN=24h
+      - JWT_REFRESH_EXPIRES_IN=7d
+      - BCRYPT_SALT_ROUNDS=12
+      - RATE_LIMIT_WINDOW_MS=900000
+      - RATE_LIMIT_MAX_REQUESTS=100
+      - CORS_ORIGIN=http://localhost:3000
+      - ORDERBOOK_SERVICE_URL=http://orderbook-server:3000
+      - LOG_LEVEL=info
+    depends_on:
+      - redis
+      - timescaledb
+      - orderbook-server
+    restart: unless-stopped
+    volumes:
+      - ./api-server:/app
       - /app/node_modules
 
 volumes:
