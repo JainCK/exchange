@@ -41,12 +41,13 @@ export interface JWTPayload {
   userId: string;
   email: string;
   username?: string;
+  type?: "access" | "refresh";
   iat: number;
   exp: number;
 }
 
 export interface AuthenticatedRequest extends Request {
-  user: User;
+  user?: User;
 }
 
 export interface Balance {

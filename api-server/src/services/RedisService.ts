@@ -48,6 +48,15 @@ export class RedisService {
     }
   }
 
+  async setWithExpiry(
+    key: string,
+    value: string,
+    ttlSeconds: number
+  ): Promise<void> {
+    if (!this.isConnected) return;
+    await this.client.setEx(key, ttlSeconds, value);
+  }
+
   async get(key: string): Promise<string | null> {
     if (!this.isConnected) return null;
     return await this.client.get(key);
@@ -56,6 +65,10 @@ export class RedisService {
   async del(key: string): Promise<number> {
     if (!this.isConnected) return 0;
     return await this.client.del(key);
+  }
+
+  async delete(key: string): Promise<number> {
+    return await this.del(key);
   }
 
   async exists(key: string): Promise<boolean> {

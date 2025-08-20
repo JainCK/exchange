@@ -34,6 +34,7 @@ export class AuthService {
       userId: user.id,
       email: user.email,
       username: user.username || undefined,
+      type: "access" as const,
     };
 
     return jwt.sign(payload, JWT_SECRET);
@@ -45,7 +46,7 @@ export class AuthService {
   static generateRefreshToken(user: User): string {
     const payload = {
       userId: user.id,
-      type: "refresh",
+      type: "refresh" as const,
     };
 
     return jwt.sign(payload, JWT_SECRET);
